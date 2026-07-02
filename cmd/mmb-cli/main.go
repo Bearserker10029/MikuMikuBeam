@@ -43,7 +43,9 @@ func main() {
 	attackCmd.Flags().IntVar(&duration, "duration", 60, "Duration in seconds")
 	attackCmd.Flags().IntVar(&delay, "delay", 500, "Packet delay in ms")
 	attackCmd.Flags().IntVar(&psize, "packet-size", 512, "Packet size")
-	attackCmd.Flags().BoolVar(&noProxy, "no-proxy", false, "Allow running without proxies")
+	attackCmd.Flags().BoolVar(&noProxy, "no-proxy", true, "Allow running without proxies when none are available")
+	var requireProxies bool
+	attackCmd.Flags().BoolVar(&requireProxies, "require-proxies", false, "Require proxies to be present before starting attacks")
 	attackCmd.Flags().IntVar(&threads, "threads", 0, "Number of threads (0=NumCPU)")
 	attackCmd.Flags().BoolVar(&verbose, "verbose", false, "Show detailed attack logs")
 	// no required flags; fail on missing args via cobra.ExactArgs
@@ -66,8 +68,9 @@ func main() {
 
 		kind := engine.AttackKind(strings.ToLower(method))
 		filtered := proxy.FilterByMethod(proxies, kind)
-		if len(filtered) == 0 && !noProxy {
-			color.Red("No proxies available (file: %s). Use --no-proxy to proceed.", cfg.ProxiesFile)
+		allowNoProxy := noProxy && !requireProxies
+		if len(filtered) == 0 && !allowNoProxy {
+			color.Red("No proxies available (file: %s). Use --no-proxy to proceed or --require-proxies=false to allow direct attacks.", cfg.ProxiesFile)
 			return fmt.Errorf("no proxies available")
 		}
 

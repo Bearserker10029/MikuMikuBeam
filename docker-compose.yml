@@ -1,0 +1,15 @@
+services:
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: miku-beam:latest
+    container_name: miku-beam
+    restart: unless-stopped
+    ports:
+      - "3001:3000"
+    environment:
+      NODE_ENV: production
+    # Mount data/ so proxy/user-agent changes persist across container rebuilds.
+    volumes:
+      - ./data:/app/data

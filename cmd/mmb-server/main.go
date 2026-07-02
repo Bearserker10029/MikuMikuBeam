@@ -37,7 +37,9 @@ func main() {
 
 	// flags
 	var noProxyFlag bool
-	flag.BoolVar(&noProxyFlag, "no-proxy", false, "Allow running without proxies")
+	flag.BoolVar(&noProxyFlag, "no-proxy", true, "Allow running without proxies when none are available")
+	var requireProxiesFlag bool
+	flag.BoolVar(&requireProxiesFlag, "require-proxies", false, "Require proxies to be present before starting attacks")
 	flag.Parse()
 
 	cfg, _ := config.Load("")
@@ -88,6 +90,9 @@ func main() {
 		log.Info().Msgf("socket connected id=%s", client.Id())
 
 		allowNoProxy := strings.EqualFold(os.Getenv("ALLOW_NO_PROXY"), "true") || noProxyFlag
+		if requireProxiesFlag {
+			allowNoProxy = false
+		}
 		clientID := client.Id()
 		attackID := fmt.Sprintf("client-%s", clientID)
 

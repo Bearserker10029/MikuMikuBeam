@@ -1,0 +1,34 @@
+# Build artifacts
+bin/
+dist/
+web-client/dist/
+web-client/node_modules/
+
+# Go cache / vendor noise
+*.test
+*.out
+
+# NOTE: data/proxies.txt and data/uas.txt MUST be baked into the image
+# because mmb-server reads them on startup. Do not exclude them here.
+
+# Editor / OS junk
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Git metadata
+.git/
+.gitignore
+.github/
+
+# Local config / docs that don't belong in the image
+docs/
+*.md
+LICENSE
+
+# Don't recurse the docker file itself or compose
+Dockerfile
+Dockerfile.*
+docker-compose.yml
+.dockerignore

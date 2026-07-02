@@ -1,0 +1,2 @@
+# Keep this directory in git even when empty.
+# proxies.txt and uas.txt are populated at runtime via the web panel.

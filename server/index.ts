@@ -82,7 +82,7 @@ io.on("connection", (socket) => {
 
     worker.on("message", (message) => socket.emit("stats", message));
 
-    worker.on("error", (error) => {
+    worker.on("error", (error: Error) => {
       console.error(`Worker error: ${error.message}`);
       socket.emit("stats", { log: `❌ Worker error: ${error.message}` });
     });

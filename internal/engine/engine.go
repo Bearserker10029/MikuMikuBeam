@@ -16,9 +16,12 @@ type AttackKind string
 
 const (
 	AttackHTTPFlood     AttackKind = "http_flood"
+	AttackHTTPBurst     AttackKind = "http_burst"
 	AttackHTTPBypass    AttackKind = "http_bypass"
 	AttackHTTPSlowloris AttackKind = "http_slowloris"
 	AttackTCPFlood      AttackKind = "tcp_flood"
+	AttackTCPBurst      AttackKind = "tcp_burst"
+	AttackTCPSlowloris  AttackKind = "tcp_slowloris"
 	AttackMinecraftPing AttackKind = "minecraft_ping"
 )
 

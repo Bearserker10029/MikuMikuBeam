@@ -69,9 +69,12 @@ func main() {
 
 		reg := engine.NewRegistry()
 		reg.Register(engine.AttackHTTPFlood, http.NewFloodWorker())
+		reg.Register(engine.AttackHTTPBurst, http.NewBurstWorker())
 		reg.Register(engine.AttackHTTPBypass, http.NewBypassWorker())
 		reg.Register(engine.AttackHTTPSlowloris, http.NewSlowlorisWorker())
 		reg.Register(engine.AttackTCPFlood, tcp.NewFloodWorker())
+		reg.Register(engine.AttackTCPBurst, tcp.NewBurstWorker())
+		reg.Register(engine.AttackTCPSlowloris, tcp.NewSlowlorisWorker())
 		reg.Register(engine.AttackMinecraftPing, mc.NewPingWorker())
 
 		eng := engine.NewEngine(*reg)

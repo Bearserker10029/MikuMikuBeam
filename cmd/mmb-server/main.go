@@ -40,7 +40,17 @@ func main() {
 	flag.BoolVar(&noProxyFlag, "no-proxy", false, "Allow running without proxies")
 	flag.Parse()
 
-	cfg, _ := config.Load("")
+	cfg, err := config.Load("")
+	if err != nil {
+		log.Warn().Err(err).Msg("Could not load config, using defaults")
+	}
+
+	// API key authentication
+	apiKey := os.Getenv("MMB_API_KEY")
+	if apiKey == "" {
+		log.Warn().Msg("MMB_API_KEY not set — server is running WITHOUT authentication. Set MMB_API_KEY env var to secure it.")
+	}
+
 	e := echo.New()
 	e.HideBanner = true
 	e.Logger.SetOutput(io.Discard)
@@ -48,8 +58,27 @@ func main() {
 	e.Use(middleware.CORSWithConfig(middleware.CORSConfig{
 		AllowOrigins: []string{cfg.AllowedOrigin},
 		AllowMethods: []string{http.MethodGet, http.MethodPost},
-		AllowHeaders: []string{"Content-Type"},
+		AllowHeaders: []string{"Content-Type", "Authorization"},
 	}))
+
+	// API key middleware for non-static routes
+	if apiKey != "" {
+		e.Use(func(next echo.HandlerFunc) echo.HandlerFunc {
+			return func(c echo.Context) error {
+				path := c.Request().URL.Path
+				// Skip auth for static files and socket.io (socket.io has its own auth)
+				if !strings.HasPrefix(path, "/attacks") &&
+					!strings.HasPrefix(path, "/configuration") {
+					return next(c)
+				}
+				auth := c.Request().Header.Get("Authorization")
+				if auth != "Bearer "+apiKey {
+					return c.JSON(http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
+				}
+				return next(c)
+			}
+		})
+	}
 
 	// Socket.io server (compatible con v3/v4 clients)
 	io := socketio.NewServer(nil, nil)
@@ -63,8 +92,14 @@ func main() {
 
 	eng := engine.NewEngine(*reg)
 
-	proxies, _ := proxy.LoadProxies(cfg.ProxiesFile)
-	uas, _ := proxy.LoadUserAgents(cfg.UserAgentsFile)
+	proxies, err := proxy.LoadProxies(cfg.ProxiesFile)
+	if err != nil {
+		log.Warn().Err(err).Str("file", cfg.ProxiesFile).Msg("Could not load proxies")
+	}
+	uas, err := proxy.LoadUserAgents(cfg.UserAgentsFile)
+	if err != nil {
+		log.Warn().Err(err).Str("file", cfg.UserAgentsFile).Msg("Could not load user agents")
+	}
 
 	// list attacks endpoint
 	e.GET("/attacks", func(c echo.Context) error {
@@ -78,6 +113,27 @@ func main() {
 
 	io.On("connection", func(clients ...any) {
 		client := clients[0].(*socketio.Socket)
+
+		// Check API key on socket connection if configured
+		if apiKey != "" {
+			authData := client.Handshake().Auth
+			if authData == nil {
+				client.Emit("attackError", map[string]any{"message": "Authentication required. Provide API key in auth handshake."})
+				client.Disconnect(true)
+				return
+			}
+			if authMap, ok := authData.(map[string]any); ok {
+				if key, _ := authMap["apiKey"].(string); key != apiKey {
+					client.Emit("attackError", map[string]any{"message": "Invalid API key."})
+					client.Disconnect(true)
+					return
+				}
+			} else {
+				client.Emit("attackError", map[string]any{"message": "Invalid auth format."})
+				client.Disconnect(true)
+				return
+			}
+		}
 
 		client.Emit("stats", map[string]any{
 			"pps":          0,
@@ -125,6 +181,29 @@ func main() {
 				Threads:      toInt(payload["threads"]),
 			}
 
+			// Input validation
+			if req.Target == "" {
+				client.Emit("attackError", map[string]any{"message": "Target is required"})
+				return
+			}
+			if req.DurationSec < 1 || req.DurationSec > 3600 {
+				client.Emit("attackError", map[string]any{"message": "Duration must be between 1 and 3600 seconds"})
+				return
+			}
+			if req.Threads < 0 || req.Threads > 256 {
+				client.Emit("attackError", map[string]any{"message": "Threads must be between 0 and 256"})
+				return
+			}
+			if req.PacketDelay < 0 || req.PacketDelay > 10000 {
+				client.Emit("attackError", map[string]any{"message": "Packet delay must be between 0 and 10000 ms"})
+				return
+			}
+
+			// Default packet delay if not specified
+			if req.PacketDelay == 0 {
+				req.PacketDelay = 50
+			}
+
 			log.Info().Msgf("startAttack received: method=%s target=%s duration=%ds delay=%d size=%d threads=%d",
 				req.AttackMethod, req.Target, req.DurationSec, req.PacketDelay, req.PacketSize, req.Threads)
 
@@ -139,7 +218,12 @@ func main() {
 				return
 			}
 
-			tn, _ := targetpkg.Parse(req.Target)
+			tn, err := targetpkg.Parse(req.Target)
+			if err != nil {
+				client.Emit("attackError", map[string]any{"message": "Invalid target: " + err.Error()})
+				return
+			}
+
 			params := engine.AttackParams{
 				Target:      req.Target,
 				TargetNode:  tn,
@@ -151,7 +235,12 @@ func main() {
 				Verbose:     true, // Always verbose for web client
 			}
 
-			statsCh, _ := eng.Start(attackID, context.Background(), params, filtered, uas)
+			statsCh, err := eng.Start(attackID, context.Background(), params, filtered, uas)
+			if err != nil {
+				client.Emit("attackError", map[string]any{"message": "Failed to start attack: " + err.Error()})
+				return
+			}
+
 			log.Info().Msgf("attack started: id=%s method=%s target=%s proxies=%d", attackID, req.AttackMethod, req.Target, len(filtered))
 			client.Emit("attackAccepted", map[string]any{"ok": true, "proxies": len(filtered)})
 

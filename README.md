@@ -210,6 +210,17 @@ Access to the `data/proxies.txt` and `data/uas.txt` can now be done fully in the
 
 ![AnnotatedImage](docs/annotated-button.png)
 
+> [!TIP]
+> **Don't want to use proxies?**
+> You can bypass the proxy requirement entirely by running the server with the `ALLOW_NO_PROXY=true` environment variable:
+> ```bash
+> ALLOW_NO_PROXY=true ./bin/mmb-server
+> # or using make:
+> ALLOW_NO_PROXY=true make run-server
+> ```
+> (On Windows PowerShell, use `$env:ALLOW_NO_PROXY="true"` before running the server).
+
+
 ## Multi-threaded Attack Handling 🔧💡
 
 Each attack runs in multiple goroutines (threads), ensuring optimal performance and scalability. The attack workers are dynamically loaded based on the selected attack method (HTTP, TCP, etc...).

